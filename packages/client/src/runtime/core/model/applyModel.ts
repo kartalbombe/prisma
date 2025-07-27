@@ -14,7 +14,7 @@ import type { PrismaPromise } from '../request/PrismaPromise'
 import type { StreamablePrismaPromise } from '../request/StreamablePrismaPromise'
 import type { UserArgs } from '../request/UserArgs'
 import { createStreamablePrismaPromise } from '../request/createPrismaPromise'
-import { createResultStreamer } from '../request/resultStreamer'
+import { createEnhancedResultStreamer } from '../request/resultStreamer'
 import { applyAggregates } from './applyAggregates'
 import { applyFieldsProxy } from './applyFieldsProxy'
 import { applyFluent } from './applyFluent'
@@ -107,9 +107,36 @@ function modelActionsLayer(client: Client, dmmfModelName: string): CompositeProx
             return client._request({ ...params, ...paramOverrides })
           }
 
+          // Create a chunked request function for true streaming
+          const createChunkedRequest = async (skip: number, take: number) => {
+            const chunkParams: InternalRequestParams = {
+              // data and its dataPath for nested results
+              args: {
+                ...userArgs,
+                skip,
+                take,
+              },
+              dataPath: [],
+
+              // action name and its related model
+              action: dmmfActionName,
+              model: dmmfModelName,
+
+              // method name for display only
+              clientMethod: `${jsModelName}.${key}`,
+              jsModelName,
+
+              // stack trace
+              callsite: callSite,
+            }
+
+            const result = await client._request({ ...chunkParams, ...paramOverrides })
+            return Array.isArray(result) ? result : []
+          }
+
           return createStreamablePrismaPromise(
             promiseCallback,
-            createResultStreamer(promiseCallback),
+            createEnhancedResultStreamer(createChunkedRequest),
             {
               action: dmmfActionName,
               args: userArgs,

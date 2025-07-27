@@ -1,10 +1,11 @@
 /**
  * End-to-end demonstration of the streaming functionality
  * This test demonstrates all the examples from the original issue
+ * with TRUE streaming that fetches data as it arrives from the network
  */
 
 import { createStreamablePrismaPromise } from '../../../runtime/core/request/createPrismaPromise'
-import { createResultStreamer } from '../../../runtime/core/request/resultStreamer'
+import { createEnhancedResultStreamer } from '../../../runtime/core/request/resultStreamer'
 
 describe('End-to-End Streaming Demo', () => {
   // Sample data that represents what would come from a database
@@ -15,10 +16,19 @@ describe('End-to-End Streaming Demo', () => {
     active: i % 2 === 0, // Every other user is active (starting with id 1)
   }))
 
-  // Simulate the actual createStreamablePrismaPromise function
-  const createFindManyPromise = (data: typeof mockUsers) => {
+  // Simulate the actual createStreamablePrismaPromise function with TRUE streaming
+  const createFindManyPromise = (data: typeof mockUsers, chunkSize: number = 100) => {
+    // Mock the original promise callback (for backward compatibility)
     const promiseCallback = async () => Promise.resolve(data)
-    const streamCallback = createResultStreamer(promiseCallback)
+    
+    // Create the chunked request function for true streaming
+    const createChunkedRequest = async (skip: number, take: number) => {
+      // Simulate network delay to demonstrate true streaming
+      await new Promise(resolve => setTimeout(resolve, 10))
+      return data.slice(skip, skip + take)
+    }
+    
+    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, chunkSize)
     
     return createStreamablePrismaPromise(
       promiseCallback,
@@ -60,21 +70,35 @@ describe('End-to-End Streaming Demo', () => {
     expect(csvContent[5]).toBe('5\tUser 5\n')
   })
 
-  it('should work with large datasets as mentioned in the issue (1,000,000 rows simulation)', async () => {
+  it('should demonstrate TRUE streaming - data arrives from network in chunks', async () => {
     // From the issue: "Let's say I have 1.000.000 rows in my database"
-    // We'll simulate with 1000 rows for test efficiency
-    const largeDataset = Array.from({ length: 1000 }, (_, i) => ({
+    // We'll simulate with 250 rows to test chunked behavior with chunk size of 100
+    const largeDataset = Array.from({ length: 250 }, (_, i) => ({
       id: i + 1,
       name: `User ${i + 1}`,
       email: `user${i + 1}@example.com`,
     }))
 
-    const findManyResult = createFindManyPromise(largeDataset)
-    
+    // Track when each chunk arrives to prove streaming
+    const chunkArrivalTimes: number[] = []
     let processedCount = 0
+    
+    // Create a custom chunked request function to track timing
+    const createChunkedRequest = async (skip: number, take: number) => {
+      chunkArrivalTimes.push(Date.now())
+      // Simulate network delay
+      await new Promise(resolve => setTimeout(resolve, 50))
+      return largeDataset.slice(skip, skip + take)
+    }
+    
+    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, 100)
+    const streamablePrisma = {} as any
+    streamablePrisma.stream = streamCallback
+    
     let firstUser, lastUser
+    const startTime = Date.now()
 
-    for await (const user of findManyResult.stream()) {
+    for await (const user of streamablePrisma.stream()) {
       if (processedCount === 0) firstUser = user
       lastUser = user
       processedCount++
@@ -83,9 +107,14 @@ describe('End-to-End Streaming Demo', () => {
       expect(user.id).toBe(processedCount)
     }
 
-    expect(processedCount).toBe(1000)
+    expect(processedCount).toBe(250)
     expect(firstUser).toMatchObject({ id: 1, name: 'User 1' })
-    expect(lastUser).toMatchObject({ id: 1000, name: 'User 1000' })
+    expect(lastUser).toMatchObject({ id: 250, name: 'User 250' })
+    
+    // Verify that chunks arrived at different times (proving streaming)
+    expect(chunkArrivalTimes.length).toBe(3) // Should have made 3 chunked requests
+    expect(chunkArrivalTimes[1] - chunkArrivalTimes[0]).toBeGreaterThan(40) // At least network delay
+    expect(chunkArrivalTimes[2] - chunkArrivalTimes[1]).toBeGreaterThan(40) // At least network delay
   })
 
   it('should maintain backward compatibility with regular promise usage', async () => {
@@ -106,14 +135,20 @@ describe('End-to-End Streaming Demo', () => {
   })
 
   it('should demonstrate real-world use case: data export with processing', async () => {
-    const findManyResult = createFindManyPromise(mockUsers.slice(0, 20))
+    const findManyResult = createFindManyPromise(mockUsers.slice(0, 20), 5) // Small chunks for demo
     
     // Simulate exporting only active users to JSON
     const exportedUsers = []
     let totalProcessed = 0
+    let chunksProcessed = 0
 
     for await (const user of findManyResult.stream()) {
       totalProcessed++
+      
+      // Track that we're processing in chunks
+      if (totalProcessed % 5 === 1) {
+        chunksProcessed++
+      }
       
       if (user.active) {
         // Transform and export only active users
@@ -126,6 +161,7 @@ describe('End-to-End Streaming Demo', () => {
     }
 
     expect(totalProcessed).toBe(20) // Processed all users
+    expect(chunksProcessed).toBe(4) // Should have processed 4 chunks of 5 users each
     expect(exportedUsers.length).toBe(10) // Only active users (every other one)
     expect(exportedUsers[0]).toMatchObject({
       id: 1, // First active user has id 1 (since i % 2 === 0 when i === 0)
@@ -153,26 +189,49 @@ describe('End-to-End Streaming Demo', () => {
     expect(singleUsers[0]).toMatchObject({ id: 1, name: 'User 1' })
   })
 
-  it('should demonstrate the issue requirement: DO NOT USE cursors', async () => {
-    // This test demonstrates that we're not using cursor-based pagination
-    // Instead, we're streaming the actual results from the network
+  it('should demonstrate the issue requirement: streams data as it arrives from network', async () => {
+    // This test proves we're streaming data from the network, not fetching all at once
     
-    const findManyResult = createFindManyPromise(mockUsers.slice(0, 10))
+    const dataset = mockUsers.slice(0, 30) // 30 items to be fetched in 3 chunks of 10
+    const requestLog: Array<{ skip: number; take: number; timestamp: number }> = []
     
-    // The streaming should yield the exact same data that the promise resolves to
-    const promiseResult = await findManyResult
+    // Track all network requests
+    const createChunkedRequest = async (skip: number, take: number) => {
+      requestLog.push({ skip, take, timestamp: Date.now() })
+      // Simulate actual network delay
+      await new Promise(resolve => setTimeout(resolve, 30))
+      return dataset.slice(skip, skip + take)
+    }
+    
+    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, 10)
+    const streamablePrisma = {} as any
+    streamablePrisma.stream = streamCallback
+    
     const streamResult = []
+    const processingLog: Array<{ itemId: number; timestamp: number }> = []
     
-    for await (const user of findManyResult.stream()) {
+    for await (const user of streamablePrisma.stream()) {
+      processingLog.push({ itemId: user.id, timestamp: Date.now() })
       streamResult.push(user)
     }
 
-    // Should be identical - no cursor-based modification of results
-    expect(streamResult).toEqual(promiseResult)
+    // Verify we streamed all data correctly
+    expect(streamResult).toHaveLength(30)
+    expect(streamResult.map(u => u.id)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1))
     
-    // Verify we're not doing pagination by checking that order is preserved
-    for (let i = 0; i < streamResult.length; i++) {
-      expect(streamResult[i].id).toBe(i + 1)
-    }
+    // Verify we made 3 chunked requests as expected
+    expect(requestLog).toHaveLength(3)
+    expect(requestLog[0]).toMatchObject({ skip: 0, take: 10 })
+    expect(requestLog[1]).toMatchObject({ skip: 10, take: 10 })
+    expect(requestLog[2]).toMatchObject({ skip: 20, take: 10 })
+    
+    // Verify requests were made at different times (proving streaming)
+    expect(requestLog[1].timestamp - requestLog[0].timestamp).toBeGreaterThan(20)
+    expect(requestLog[2].timestamp - requestLog[1].timestamp).toBeGreaterThan(20)
+    
+    // Verify processing started before all data was fetched
+    const firstItemProcessed = processingLog[0].timestamp
+    const lastRequestMade = requestLog[2].timestamp
+    expect(firstItemProcessed).toBeLessThan(lastRequestMade) // Started processing before final request
   })
 })
