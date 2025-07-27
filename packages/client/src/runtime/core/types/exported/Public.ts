@@ -32,6 +32,15 @@ export interface PrismaPromise<T> extends Promise<T> {
   [Symbol.toStringTag]: 'PrismaPromise'
 }
 
+// StreamablePrismaPromise for findMany operations that support streaming
+export interface StreamablePrismaPromise<T extends any[]> extends PrismaPromise<T> {
+  /**
+   * Returns an AsyncIterator that yields results as they come from the database
+   * @returns AsyncIterator that yields individual items from the result array
+   */
+  stream(): AsyncIterator<T[number]>
+}
+
 export { type Operation }
 
 export { type Exact }

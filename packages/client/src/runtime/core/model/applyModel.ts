@@ -11,7 +11,10 @@ import {
   createCompositeProxy,
 } from '../compositeProxy'
 import type { PrismaPromise } from '../request/PrismaPromise'
+import type { StreamablePrismaPromise } from '../request/StreamablePrismaPromise'
 import type { UserArgs } from '../request/UserArgs'
+import { createStreamablePrismaPromise } from '../request/createPrismaPromise'
+import { createSingleQueryStreamer } from '../request/resultStreamer'
 import { applyAggregates } from './applyAggregates'
 import { applyFieldsProxy } from './applyFieldsProxy'
 import { applyFluent } from './applyFluent'
@@ -19,7 +22,7 @@ import { dmmfToJSModelName } from './utils/dmmfToJSModelName'
 
 export type ModelAction = (
   paramOverrides: O.Optional<InternalRequestParams>,
-) => (userArgs?: UserArgs) => PrismaPromise<unknown>
+) => (userArgs?: UserArgs) => PrismaPromise<unknown> | StreamablePrismaPromise<any[]>
 
 const fluentProps = [
   'findUnique',
@@ -78,6 +81,68 @@ function modelActionsLayer(client: Client, dmmfModelName: string): CompositeProx
       const action = (paramOverrides: O.Optional<InternalRequestParams>) => (userArgs?: UserArgs) => {
         const callSite = getCallSite(client._errorFormat) // used for showing better errors
 
+        // Special handling for findMany to create a streamable promise
+        if (dmmfActionName === DMMF.ModelAction.findMany) {
+          const promiseCallback = (transaction?: any) => {
+            const params: InternalRequestParams = {
+              // data and its dataPath for nested results
+              args: userArgs,
+              dataPath: [],
+
+              // action name and its related model
+              action: dmmfActionName,
+              model: dmmfModelName,
+
+              // method name for display only
+              clientMethod: `${jsModelName}.${key}`,
+              jsModelName,
+
+              // transaction information
+              transaction,
+
+              // stack trace
+              callsite: callSite,
+            }
+
+            return client._request({ ...params, ...paramOverrides })
+          }
+
+          // Create a single query executor for true streaming
+          // This makes ONE database request and streams the results as they arrive
+          const executeQuery = async () => {
+            const params: InternalRequestParams = {
+              // data and its dataPath for nested results
+              args: userArgs,
+              dataPath: [],
+
+              // action name and its related model
+              action: dmmfActionName,
+              model: dmmfModelName,
+
+              // method name for display only
+              clientMethod: `${jsModelName}.${key}`,
+              jsModelName,
+
+              // stack trace
+              callsite: callSite,
+            }
+
+            const result = await client._request({ ...params, ...paramOverrides })
+            return Array.isArray(result) ? result : []
+          }
+
+          return createStreamablePrismaPromise(
+            promiseCallback,
+            createSingleQueryStreamer(executeQuery),
+            {
+              action: dmmfActionName,
+              args: userArgs,
+              model: dmmfModelName,
+            },
+          )
+        }
+
+        // Regular promise for all other actions
         return client._createPrismaPromise(
           (transaction) => {
             const params: InternalRequestParams = {

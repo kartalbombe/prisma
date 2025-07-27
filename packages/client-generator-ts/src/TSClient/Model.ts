@@ -810,11 +810,19 @@ function getReturnType({
 
   /**
    * Important: We handle findMany or isList special, as we don't want chaining from there
+   * For findMany specifically, we return a StreamablePrismaPromise that supports .stream()
    */
   if (isList) {
     let result: ts.TypeBuilder = getResultType(modelName, actionName)
     if (isChaining) {
       result = ts.unionType(result).addVariant(ts.namedType('Null'))
+    }
+
+    // For findMany, return a StreamablePrismaPromise that has a .stream() method
+    if (actionName === DMMF.ModelAction.findMany) {
+      return ts
+        .namedType('Prisma.StreamablePrismaPromise')
+        .addGenericArgument(result)
     }
 
     return tsx.prismaPromise(result)
