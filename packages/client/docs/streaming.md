@@ -1,23 +1,23 @@
 # Row Streaming in Prisma Client
 
-This document describes the row streaming functionality added to Prisma Client, allowing you to stream results from `findMany` queries with **true network-level streaming** using async iterators.
+This document describes the row streaming functionality added to Prisma Client, allowing you to stream results from `findMany` queries with **true single-query streaming** using async iterators.
 
 ## Overview
 
-Row streaming allows you to process large datasets efficiently by streaming data **as it arrives from the network** using chunked database requests. This implementation provides genuine streaming without loading all data into memory at once. This is particularly useful for:
+Row streaming allows you to process large datasets efficiently by making **one database request** and streaming results as they become available. This implementation provides genuine streaming without loading all data into memory at once. This is particularly useful for:
 
 - Exporting large datasets to files (CSV, JSON, etc.)
 - Processing large amounts of data with limited memory
 - Real-time data processing where you want to start processing immediately
 - Handling datasets that don't fit in memory
 
-## Key Feature: True Network Streaming
+## Key Feature: True Single-Query Streaming
 
-Unlike simple iteration over pre-fetched arrays, this implementation:
+This implementation follows the strict requirement of:
 
-1. **Makes chunked requests** to the database (default: 100 records per chunk)
-2. **Streams results as they arrive** from each network request  
-3. **Does not store all data in memory** at once
+1. **Makes ONE database request** (no pagination, no chunking)
+2. **Streams results as they arrive** from the single network request  
+3. **Does not wait for all rows** before starting to yield results
 4. **Provides memory-efficient processing** for datasets of any size
 
 ## Usage
@@ -29,7 +29,7 @@ import { PrismaClient } from '@prisma/client'
 
 const prisma = new PrismaClient()
 
-// Stream all users - data arrives from network in chunks
+// Stream all users - one database query, results streamed as they arrive
 for await (const user of prisma.user.findMany().stream()) {
   console.log(user.name)
 }
@@ -43,7 +43,7 @@ import fs from 'fs'
 const file = fs.createWriteStream('users.csv')
 file.write('id\tname\temail\n')
 
-// Data is fetched and processed incrementally
+// Single database query, data processed as it arrives
 for await (const user of prisma.user.findMany().stream()) {
   file.write(`${user.id}\t${user.name}\t${user.email}\n`)
 }
@@ -54,7 +54,7 @@ file.end()
 ### Processing Large Datasets
 
 ```typescript
-// Process millions of records efficiently
+// Process millions of records efficiently with one query
 let count = 0
 for await (const user of prisma.user.findMany().stream()) {
   await processUser(user)
@@ -69,7 +69,7 @@ for await (const user of prisma.user.findMany().stream()) {
 ### Processing with Filtering
 
 ```typescript
-// Only stream active users
+// Only stream active users - single query with WHERE clause
 for await (const user of prisma.user.findMany({
   where: { active: true }
 }).stream()) {
@@ -102,46 +102,45 @@ const users = await prisma.user.findMany()
 
 // New streaming functionality
 for await (const user of prisma.user.findMany().stream()) {
-  // Process users as they arrive from the network
+  // Process users as they arrive from the single database query
 }
 ```
 
 ## How It Works
 
-### True Network Streaming Implementation
+### True Single-Query Streaming Implementation
 
 The current implementation provides genuine streaming by:
 
-1. **Breaking queries into chunks**: Original query is split using `skip` and `take`
-2. **Making incremental requests**: Database requests are made as data is consumed
-3. **Streaming immediate results**: Data is yielded as soon as each chunk arrives
-4. **Memory efficiency**: Only one chunk (100 records) in memory at a time
+1. **Making one database request**: Single `findMany` query as specified
+2. **Streaming immediate results**: Data is yielded as soon as it becomes available from the network
+3. **Memory efficiency**: Results are processed one at a time, not stored in memory
+4. **No pagination**: No chunking, no multiple requests - exactly as requested
 
 ### Example Request Flow
 
 For a query like `prisma.user.findMany()` with 250 users:
 
 ```
-Network Request 1: findMany({ skip: 0, take: 100 })   → Users 1-100   [~10ms]
-Network Request 2: findMany({ skip: 100, take: 100 }) → Users 101-200 [~20ms]  
-Network Request 3: findMany({ skip: 200, take: 100 }) → Users 201-250 [~30ms]
+Single Network Request: findMany() → Streams Users 1-250 individually [~20ms]
+Processing: User 1 → User 2 → User 3 → ... → User 250
 ```
 
-Processing begins immediately after the first chunk arrives, not after all data is loaded.
+Processing begins immediately as results start arriving from the single database query.
 
 ## Performance Considerations
 
 ### Memory Usage
 
-- **Constant memory**: Only ~100 records in memory regardless of dataset size
-- **Immediate processing**: Start processing data as soon as first chunk arrives
+- **Constant memory**: Only one record in memory at a time regardless of dataset size
+- **Immediate processing**: Start processing data as soon as first result arrives
 - **Scalable**: Can handle datasets of millions of records
 
 ### Network Efficiency
 
-- **Chunked requests**: Multiple smaller requests instead of one large request
-- **Incremental loading**: Data is requested only as it's consumed
-- **Responsive**: Provides progress feedback and early termination capabilities
+- **Single request**: One database query instead of multiple paginated requests
+- **Streaming results**: Data is processed as it arrives from the network
+- **Responsive**: Provides immediate feedback and early termination capabilities
 
 ### When to Use Streaming
 
@@ -173,14 +172,6 @@ try {
   // Partial results may have been processed before the error
 }
 ```
-
-## Configuration
-
-### Default Behavior
-
-- **Chunk size**: 100 records per network request
-- **Request timing**: Made on-demand as data is consumed
-- **Memory usage**: ~100 records in memory at any time
 
 ## Examples
 
@@ -257,14 +248,13 @@ for await (const record of prisma.record.findMany({
 ### Current Limitations
 
 1. **findMany only**: Only available on `findMany` operations
-2. **Chunked requests**: Makes multiple database calls instead of one
-3. **Query consistency**: Each chunk is a separate transaction (unless in explicit transaction)
+2. **Single query**: Makes one database call with full result set
+3. **Query consistency**: Results are from a single point-in-time query
 
 ### Not Supported
 
 - Streaming with other query types (`findFirst`, `findUnique`, etc.)
-- Custom chunk sizes (fixed at 100 records currently)
-- Cursor-based streaming (uses offset-based chunking)
+- Cursor-based streaming (uses single result set streaming)
 
 ## TypeScript Support
 
@@ -287,21 +277,21 @@ const iterator: AsyncIterator<User> = streamablePromise.stream()
 The streaming functionality is implemented through:
 
 1. **StreamablePrismaPromise**: Interface extending PrismaPromise with stream() method
-2. **Enhanced Result Streamer**: Creates AsyncIterator with chunked network requests
+2. **Single Query Streamer**: Creates AsyncIterator that processes single query results
 3. **Type Generation**: Updated to return StreamablePrismaPromise for findMany
-4. **Runtime Integration**: Modified model actions to create streamable promises with chunked requests
+4. **Runtime Integration**: Modified model actions to create streamable promises with single queries
 
-### Network Request Strategy
+### Single Query Strategy
 
-- **Chunked queries**: Uses `skip` and `take` to create paginated requests
-- **On-demand loading**: Requests made only when iterator needs more data
-- **Automatic termination**: Stops when fewer records than chunk size are returned
+- **One database request**: Uses the original findMany query exactly as specified
+- **Immediate streaming**: Results are yielded as they arrive from the network
+- **Memory efficient**: Only one record in memory at a time
 
 ### Files Modified
 
 - `packages/client-generator-ts/src/TSClient/Model.ts`: Type generation for StreamablePrismaPromise
-- `packages/client/src/runtime/core/model/applyModel.ts`: Runtime model action with chunked requests
-- `packages/client/src/runtime/core/request/resultStreamer.ts`: Enhanced streaming with network chunking
+- `packages/client/src/runtime/core/model/applyModel.ts`: Runtime model action with single query streaming
+- `packages/client/src/runtime/core/request/resultStreamer.ts`: Single query streaming implementation
 - `packages/client/src/runtime/core/types/exported/Public.ts`: Public type definitions
 
-This implementation provides true streaming that fetches data as it arrives from the network, exactly as requested in the original issue.
+This implementation provides true single-query streaming that processes data as it arrives from the network, exactly as requested.

@@ -1,7 +1,7 @@
-import { createResultStreamer, createEnhancedResultStreamer } from '../../runtime/core/request/resultStreamer'
+import { createResultStreamer, createSingleQueryStreamer } from '../../runtime/core/request/resultStreamer'
 
 describe('Result Streamer', () => {
-  describe('Basic Result Streamer (legacy)', () => {
+  describe('Basic Result Streamer (original)', () => {
     it('should create an async iterator that yields array items one by one', async () => {
       // Mock promise callback that returns an array
       const mockData = [
@@ -55,19 +55,19 @@ describe('Result Streamer', () => {
     })
   })
 
-  describe('Enhanced Result Streamer (true streaming)', () => {
-    it('should make chunked requests and stream results as they arrive', async () => {
-      // Mock data that will be returned in chunks
+  describe('Single Query Streamer (true single-request streaming)', () => {
+    it('should make ONE database request and stream results as they arrive', async () => {
+      // Mock data that would be returned from a single findMany query
       const fullDataset = Array.from({ length: 250 }, (_, i) => ({ id: i + 1, name: `User ${i + 1}` }))
       
-      // Mock chunked request function that simulates database calls
-      const mockChunkedRequest = jest.fn().mockImplementation(async (skip: number, take: number) => {
-        // Simulate network delay
-        await new Promise(resolve => setTimeout(resolve, 10))
-        return fullDataset.slice(skip, skip + take)
+      // Mock single query executor - this simulates one database request
+      const mockExecuteQuery = jest.fn().mockImplementation(async () => {
+        // Simulate network delay for the single query
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return fullDataset
       })
 
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 100)
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
       const iterator = streamFunction()
 
       const results = []
@@ -78,18 +78,15 @@ describe('Result Streamer', () => {
       // Should have streamed all items
       expect(results).toEqual(fullDataset)
       
-      // Should have made 3 chunked requests (100 + 100 + 50)
-      expect(mockChunkedRequest).toHaveBeenCalledTimes(3)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(1, 0, 100)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(2, 100, 100)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(3, 200, 100)
+      // Should have made only ONE database request
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
     })
 
-    it('should handle small datasets that fit in one chunk', async () => {
+    it('should handle small datasets with single request', async () => {
       const smallDataset = [{ id: 1 }, { id: 2 }, { id: 3 }]
       
-      const mockChunkedRequest = jest.fn().mockResolvedValue(smallDataset)
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 100)
+      const mockExecuteQuery = jest.fn().mockResolvedValue(smallDataset)
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
       const iterator = streamFunction()
 
       const results = []
@@ -98,13 +95,12 @@ describe('Result Streamer', () => {
       }
 
       expect(results).toEqual(smallDataset)
-      expect(mockChunkedRequest).toHaveBeenCalledTimes(1)
-      expect(mockChunkedRequest).toHaveBeenCalledWith(0, 100)
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
     })
 
     it('should handle empty datasets', async () => {
-      const mockChunkedRequest = jest.fn().mockResolvedValue([])
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 100)
+      const mockExecuteQuery = jest.fn().mockResolvedValue([])
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
       const iterator = streamFunction()
 
       const results = []
@@ -113,39 +109,13 @@ describe('Result Streamer', () => {
       }
 
       expect(results).toEqual([])
-      expect(mockChunkedRequest).toHaveBeenCalledTimes(1)
-      expect(mockChunkedRequest).toHaveBeenCalledWith(0, 100)
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
     })
 
-    it('should support custom chunk sizes', async () => {
-      const dataset = Array.from({ length: 25 }, (_, i) => ({ id: i + 1 }))
-      
-      const mockChunkedRequest = jest.fn().mockImplementation(async (skip: number, take: number) => {
-        return dataset.slice(skip, skip + take)
-      })
+    it('should handle errors in the single query', async () => {
+      const mockExecuteQuery = jest.fn().mockRejectedValue(new Error('Database connection failed'))
 
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 10) // Custom chunk size
-      const iterator = streamFunction()
-
-      const results = []
-      for await (const item of iterator) {
-        results.push(item)
-      }
-
-      expect(results).toEqual(dataset)
-      // Should make 3 requests: 10 + 10 + 5
-      expect(mockChunkedRequest).toHaveBeenCalledTimes(3)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(1, 0, 10)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(2, 10, 10)
-      expect(mockChunkedRequest).toHaveBeenNthCalledWith(3, 20, 10)
-    })
-
-    it('should handle errors in chunked requests', async () => {
-      const mockChunkedRequest = jest.fn()
-        .mockResolvedValueOnce([{ id: 1 }, { id: 2 }]) // First chunk succeeds
-        .mockRejectedValueOnce(new Error('Database error')) // Second chunk fails
-
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 2)
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
       const iterator = streamFunction()
 
       const results = []
@@ -155,20 +125,17 @@ describe('Result Streamer', () => {
         }
         fail('Should have thrown an error')
       } catch (error) {
-        expect(error.message).toBe('Database error')
-        expect(results).toEqual([{ id: 1 }, { id: 2 }]) // First chunk was processed
-        expect(mockChunkedRequest).toHaveBeenCalledTimes(2)
+        expect(error.message).toBe('Database connection failed')
+        expect(results).toEqual([]) // No results should be processed
+        expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
       }
     })
 
     it('should work with manual iterator usage', async () => {
       const dataset = [{ id: 1 }, { id: 2 }, { id: 3 }]
       
-      const mockChunkedRequest = jest.fn().mockImplementation(async (skip: number, take: number) => {
-        return dataset.slice(skip, skip + take)
-      })
-
-      const streamFunction = createEnhancedResultStreamer(mockChunkedRequest, 2)
+      const mockExecuteQuery = jest.fn().mockResolvedValue(dataset)
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
       const iterator = streamFunction()
 
       // Manual iteration
@@ -182,8 +149,35 @@ describe('Result Streamer', () => {
       expect(result3).toEqual({ done: false, value: { id: 3 } })
       expect(result4).toEqual({ done: true, value: undefined })
 
-      // Should have made 2 chunked requests
-      expect(mockChunkedRequest).toHaveBeenCalledTimes(2)
+      // Should have made only one request
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
+    })
+
+    it('should start streaming immediately after first query completion', async () => {
+      const dataset = [{ id: 1 }, { id: 2 }, { id: 3 }]
+      let queryResolved = false
+      
+      const mockExecuteQuery = jest.fn().mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        queryResolved = true
+        return dataset
+      })
+
+      const streamFunction = createSingleQueryStreamer(mockExecuteQuery)
+      const iterator = streamFunction()
+
+      // Start consuming - this should trigger the single query
+      const firstResult = await iterator.next()
+      
+      // Query should be completed and first result available
+      expect(queryResolved).toBe(true)
+      expect(firstResult).toEqual({ done: false, value: { id: 1 } })
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1)
+
+      // Subsequent calls should not trigger additional queries
+      const secondResult = await iterator.next()
+      expect(secondResult).toEqual({ done: false, value: { id: 2 } })
+      expect(mockExecuteQuery).toHaveBeenCalledTimes(1) // Still only one call
     })
   })
 })

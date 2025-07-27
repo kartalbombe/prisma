@@ -14,7 +14,7 @@ import type { PrismaPromise } from '../request/PrismaPromise'
 import type { StreamablePrismaPromise } from '../request/StreamablePrismaPromise'
 import type { UserArgs } from '../request/UserArgs'
 import { createStreamablePrismaPromise } from '../request/createPrismaPromise'
-import { createEnhancedResultStreamer } from '../request/resultStreamer'
+import { createSingleQueryStreamer } from '../request/resultStreamer'
 import { applyAggregates } from './applyAggregates'
 import { applyFieldsProxy } from './applyFieldsProxy'
 import { applyFluent } from './applyFluent'
@@ -107,15 +107,12 @@ function modelActionsLayer(client: Client, dmmfModelName: string): CompositeProx
             return client._request({ ...params, ...paramOverrides })
           }
 
-          // Create a chunked request function for true streaming
-          const createChunkedRequest = async (skip: number, take: number) => {
-            const chunkParams: InternalRequestParams = {
+          // Create a single query executor for true streaming
+          // This makes ONE database request and streams the results as they arrive
+          const executeQuery = async () => {
+            const params: InternalRequestParams = {
               // data and its dataPath for nested results
-              args: {
-                ...userArgs,
-                skip,
-                take,
-              },
+              args: userArgs,
               dataPath: [],
 
               // action name and its related model
@@ -130,13 +127,13 @@ function modelActionsLayer(client: Client, dmmfModelName: string): CompositeProx
               callsite: callSite,
             }
 
-            const result = await client._request({ ...chunkParams, ...paramOverrides })
+            const result = await client._request({ ...params, ...paramOverrides })
             return Array.isArray(result) ? result : []
           }
 
           return createStreamablePrismaPromise(
             promiseCallback,
-            createEnhancedResultStreamer(createChunkedRequest),
+            createSingleQueryStreamer(executeQuery),
             {
               action: dmmfActionName,
               args: userArgs,

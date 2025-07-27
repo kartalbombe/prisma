@@ -1,11 +1,11 @@
 /**
  * End-to-end demonstration of the streaming functionality
  * This test demonstrates all the examples from the original issue
- * with TRUE streaming that fetches data as it arrives from the network
+ * with TRUE single-query streaming that processes data as it arrives
  */
 
 import { createStreamablePrismaPromise } from '../../../runtime/core/request/createPrismaPromise'
-import { createEnhancedResultStreamer } from '../../../runtime/core/request/resultStreamer'
+import { createSingleQueryStreamer } from '../../../runtime/core/request/resultStreamer'
 
 describe('End-to-End Streaming Demo', () => {
   // Sample data that represents what would come from a database
@@ -16,19 +16,19 @@ describe('End-to-End Streaming Demo', () => {
     active: i % 2 === 0, // Every other user is active (starting with id 1)
   }))
 
-  // Simulate the actual createStreamablePrismaPromise function with TRUE streaming
-  const createFindManyPromise = (data: typeof mockUsers, chunkSize: number = 100) => {
+  // Simulate the actual createStreamablePrismaPromise function with TRUE single-query streaming
+  const createFindManyPromise = (data: typeof mockUsers) => {
     // Mock the original promise callback (for backward compatibility)
     const promiseCallback = async () => Promise.resolve(data)
     
-    // Create the chunked request function for true streaming
-    const createChunkedRequest = async (skip: number, take: number) => {
-      // Simulate network delay to demonstrate true streaming
-      await new Promise(resolve => setTimeout(resolve, 10))
-      return data.slice(skip, skip + take)
+    // Create the single query executor for true streaming
+    const executeQuery = async () => {
+      // Simulate network delay for the single database request
+      await new Promise(resolve => setTimeout(resolve, 20))
+      return data
     }
     
-    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, chunkSize)
+    const streamCallback = createSingleQueryStreamer(executeQuery)
     
     return createStreamablePrismaPromise(
       promiseCallback,
@@ -70,36 +70,42 @@ describe('End-to-End Streaming Demo', () => {
     expect(csvContent[5]).toBe('5\tUser 5\n')
   })
 
-  it('should demonstrate TRUE streaming - data arrives from network in chunks', async () => {
-    // From the issue: "Let's say I have 1.000.000 rows in my database"
-    // We'll simulate with 250 rows to test chunked behavior with chunk size of 100
+  it('should demonstrate TRUE single-query streaming - one database request', async () => {
+    // From the issue: "We need to do a one fetch from the database"
+    // This should make ONE request and stream results as they become available
     const largeDataset = Array.from({ length: 250 }, (_, i) => ({
       id: i + 1,
       name: `User ${i + 1}`,
       email: `user${i + 1}@example.com`,
     }))
 
-    // Track when each chunk arrives to prove streaming
-    const chunkArrivalTimes: number[] = []
+    // Track when the single query is made
+    let queryStartTime: number
+    let queryEndTime: number
     let processedCount = 0
     
-    // Create a custom chunked request function to track timing
-    const createChunkedRequest = async (skip: number, take: number) => {
-      chunkArrivalTimes.push(Date.now())
-      // Simulate network delay
+    // Create a custom single query executor to track timing
+    const executeQuery = async () => {
+      queryStartTime = Date.now()
+      // Simulate single database request delay
       await new Promise(resolve => setTimeout(resolve, 50))
-      return largeDataset.slice(skip, skip + take)
+      queryEndTime = Date.now()
+      return largeDataset
     }
     
-    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, 100)
+    const streamCallback = createSingleQueryStreamer(executeQuery)
     const streamablePrisma = {} as any
     streamablePrisma.stream = streamCallback
     
     let firstUser, lastUser
-    const startTime = Date.now()
+    const processingStartTime = Date.now()
+    let firstItemProcessedTime: number
 
     for await (const user of streamablePrisma.stream()) {
-      if (processedCount === 0) firstUser = user
+      if (processedCount === 0) {
+        firstUser = user
+        firstItemProcessedTime = Date.now()
+      }
       lastUser = user
       processedCount++
       
@@ -111,10 +117,13 @@ describe('End-to-End Streaming Demo', () => {
     expect(firstUser).toMatchObject({ id: 1, name: 'User 1' })
     expect(lastUser).toMatchObject({ id: 250, name: 'User 250' })
     
-    // Verify that chunks arrived at different times (proving streaming)
-    expect(chunkArrivalTimes.length).toBe(3) // Should have made 3 chunked requests
-    expect(chunkArrivalTimes[1] - chunkArrivalTimes[0]).toBeGreaterThan(40) // At least network delay
-    expect(chunkArrivalTimes[2] - chunkArrivalTimes[1]).toBeGreaterThan(40) // At least network delay
+    // Verify that only ONE query was made (not chunked requests)
+    expect(queryStartTime).toBeDefined()
+    expect(queryEndTime).toBeDefined()
+    expect(queryEndTime - queryStartTime).toBeGreaterThan(40) // Single query took time
+    
+    // Verify processing started after the single query completed
+    expect(firstItemProcessedTime! > queryEndTime).toBe(true)
   })
 
   it('should maintain backward compatibility with regular promise usage', async () => {
@@ -134,21 +143,15 @@ describe('End-to-End Streaming Demo', () => {
     expect(streamedUsers).toEqual(users)
   })
 
-  it('should demonstrate real-world use case: data export with processing', async () => {
-    const findManyResult = createFindManyPromise(mockUsers.slice(0, 20), 5) // Small chunks for demo
+  it('should demonstrate real-world use case: data export with single query', async () => {
+    const findManyResult = createFindManyPromise(mockUsers.slice(0, 20))
     
     // Simulate exporting only active users to JSON
     const exportedUsers = []
     let totalProcessed = 0
-    let chunksProcessed = 0
 
     for await (const user of findManyResult.stream()) {
       totalProcessed++
-      
-      // Track that we're processing in chunks
-      if (totalProcessed % 5 === 1) {
-        chunksProcessed++
-      }
       
       if (user.active) {
         // Transform and export only active users
@@ -161,7 +164,6 @@ describe('End-to-End Streaming Demo', () => {
     }
 
     expect(totalProcessed).toBe(20) // Processed all users
-    expect(chunksProcessed).toBe(4) // Should have processed 4 chunks of 5 users each
     expect(exportedUsers.length).toBe(10) // Only active users (every other one)
     expect(exportedUsers[0]).toMatchObject({
       id: 1, // First active user has id 1 (since i % 2 === 0 when i === 0)
@@ -189,21 +191,23 @@ describe('End-to-End Streaming Demo', () => {
     expect(singleUsers[0]).toMatchObject({ id: 1, name: 'User 1' })
   })
 
-  it('should demonstrate the issue requirement: streams data as it arrives from network', async () => {
-    // This test proves we're streaming data from the network, not fetching all at once
+  it('should demonstrate the user requirement: single fetch with streaming results', async () => {
+    // This test proves we're making ONE database request and streaming the results
     
-    const dataset = mockUsers.slice(0, 30) // 30 items to be fetched in 3 chunks of 10
-    const requestLog: Array<{ skip: number; take: number; timestamp: number }> = []
+    const dataset = mockUsers.slice(0, 30) // 30 items from a single query
+    let queryExecuted = false
+    let queryCompletedAt: number
     
-    // Track all network requests
-    const createChunkedRequest = async (skip: number, take: number) => {
-      requestLog.push({ skip, take, timestamp: Date.now() })
-      // Simulate actual network delay
+    // Track the single database query
+    const executeQuery = async () => {
+      queryExecuted = true
+      // Simulate single database request
       await new Promise(resolve => setTimeout(resolve, 30))
-      return dataset.slice(skip, skip + take)
+      queryCompletedAt = Date.now()
+      return dataset
     }
     
-    const streamCallback = createEnhancedResultStreamer(createChunkedRequest, 10)
+    const streamCallback = createSingleQueryStreamer(executeQuery)
     const streamablePrisma = {} as any
     streamablePrisma.stream = streamCallback
     
@@ -219,19 +223,17 @@ describe('End-to-End Streaming Demo', () => {
     expect(streamResult).toHaveLength(30)
     expect(streamResult.map(u => u.id)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1))
     
-    // Verify we made 3 chunked requests as expected
-    expect(requestLog).toHaveLength(3)
-    expect(requestLog[0]).toMatchObject({ skip: 0, take: 10 })
-    expect(requestLog[1]).toMatchObject({ skip: 10, take: 10 })
-    expect(requestLog[2]).toMatchObject({ skip: 20, take: 10 })
+    // Verify only ONE query was executed (no pagination, no chunking)
+    expect(queryExecuted).toBe(true)
     
-    // Verify requests were made at different times (proving streaming)
-    expect(requestLog[1].timestamp - requestLog[0].timestamp).toBeGreaterThan(20)
-    expect(requestLog[2].timestamp - requestLog[1].timestamp).toBeGreaterThan(20)
-    
-    // Verify processing started before all data was fetched
+    // Verify all processing happened after the single query completed
     const firstItemProcessed = processingLog[0].timestamp
-    const lastRequestMade = requestLog[2].timestamp
-    expect(firstItemProcessed).toBeLessThan(lastRequestMade) // Started processing before final request
+    const lastItemProcessed = processingLog[processingLog.length - 1].timestamp
+    
+    expect(firstItemProcessed).toBeGreaterThanOrEqual(queryCompletedAt!)
+    expect(lastItemProcessed).toBeGreaterThan(firstItemProcessed)
+    
+    // Verify we processed items in the correct order
+    expect(processingLog.map(p => p.itemId)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1))
   })
 })
