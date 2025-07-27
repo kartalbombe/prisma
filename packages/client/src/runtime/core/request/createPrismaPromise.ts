@@ -1,4 +1,5 @@
 import type { PrismaOperationSpec, PrismaPromise, PrismaPromiseTransaction } from './PrismaPromise'
+import type { StreamablePrismaPromise } from './StreamablePrismaPromise'
 
 export type PrismaPromiseCallback = (transaction?: PrismaPromiseTransaction) => Promise<unknown>
 
@@ -79,4 +80,20 @@ function valueToPromise<T>(thing: T): PrismaPromise<T> {
   }
 
   return Promise.resolve(thing) as PrismaPromise<T>
+}
+
+/**
+ * Creates a StreamablePrismaPromise for findMany operations
+ */
+export function createStreamablePrismaPromise<T extends any[]>(
+  callback: PrismaPromiseCallback,
+  streamCallback: () => AsyncIterator<T[number]>,
+  op?: PrismaOperationSpec<unknown>,
+): StreamablePrismaPromise<T> {
+  const basePromise = createPrismaPromiseFactory()(callback, op) as StreamablePrismaPromise<T>
+  
+  // Add the stream method to the promise
+  basePromise.stream = streamCallback
+  
+  return basePromise
 }
